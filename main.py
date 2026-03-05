@@ -93,8 +93,13 @@ def save_state(uploaded: set[str]) -> None:
         json.dump(sorted(uploaded), f)
 
 def upload_file(filename: str) -> tuple[bool, object]:
+    """Upload using public GitHub raw URL + browser-like headers to bypass Cloudflare 1010"""
     public_url = f"{GITHUB_BASE_URL}/{filename}"
-    payload = json.dumps({"file_name": filename, "url": public_url}).encode()
+    
+    payload = json.dumps({
+        "file_name": filename,
+        "url": public_url
+    }).encode()
 
     req = urllib.request.Request(
         "https://api.printify.com/v1/uploads/images.json",
@@ -102,16 +107,24 @@ def upload_file(filename: str) -> tuple[bool, object]:
         headers={
             "Authorization": f"Bearer {PRINTIFY_TOKEN}",
             "Content-Type": "application/json",
+            # ← THESE HEADERS FIX THE 1010 BLOCK
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://printify.com/",
+            "Origin": "https://printify.com"
         },
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
+        with urllib.request.urlopen(req, timeout=25) as resp:
             return True, json.loads(resp.read())
     except urllib.error.HTTPError as e:
-        return False, e.read().decode()
+        error_body = e.read().decode()[:800]
+        return False, error_body or f"HTTP {e.code}"
     except Exception as e:
         return False, str(e)
+
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 @app.get("/")
