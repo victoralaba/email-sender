@@ -17,7 +17,6 @@ app = FastAPI(
 
 # ── Config ────────────────────────────────────────────────────────────────────
 PRINTIFY_TOKEN = os.getenv("PRINTIFY_TOKEN")
-# Change only if you move the designs folder or change repo/branch
 GITHUB_BASE_URL = os.getenv(
     "GITHUB_BASE_URL",
     "https://raw.githubusercontent.com/victoralaba/email-sender/main/public/designs"
@@ -29,13 +28,21 @@ STATE_FILE = "/tmp/uploaded_files.json"
 
 ROOT = pathlib.Path(__file__).resolve().parent
 
-# Load design list (from designs.json)
+# ── Load designs.json (with full error visibility) ────────────────────────────
 def load_design_filenames() -> list[str]:
+    file_path = ROOT / "designs.json"
     try:
-        with open(ROOT / "designs.json") as f:
-            return json.load(f)
-    except Exception:
-        return []
+        if not file_path.exists():
+            return ["ERROR: designs.json not found in deployment"]
+        with open(file_path) as f:
+            data = json.load(f)
+            if isinstance(data, list):
+                return data
+            return ["ERROR: designs.json is not a valid array"]
+    except json.JSONDecodeError as e:
+        return [f"ERROR: Invalid JSON in designs.json → {e}"]
+    except Exception as e:
+        return [f"ERROR: Could not read designs.json → {e}"]
 
 DESIGN_FILENAMES = load_design_filenames()
 
@@ -54,12 +61,8 @@ def save_state(uploaded: set[str]) -> None:
         json.dump(sorted(uploaded), f)
 
 def upload_file(filename: str) -> tuple[bool, object]:
-    """Upload using public GitHub raw URL"""
     public_url = f"{GITHUB_BASE_URL}/{filename}"
-    payload = json.dumps({
-        "file_name": filename,
-        "url": public_url
-    }).encode()
+    payload = json.dumps({"file_name": filename, "url": public_url}).encode()
 
     req = urllib.request.Request(
         "https://api.printify.com/v1/uploads/images.json",
@@ -89,18 +92,21 @@ def root():
 
 @app.get("/debug")
 def debug():
+    json_path = ROOT / "designs.json"
     return {
         "github_base_url": GITHUB_BASE_URL,
         "total_designs": len(DESIGN_FILENAMES),
-        "first_10_designs": DESIGN_FILENAMES[:10],
+        "first_10_designs": DESIGN_FILENAMES[:10] if DESIGN_FILENAMES else [],
+        "designs_json_exists": json_path.exists(),
+        "designs_json_size_bytes": json_path.stat().st_size if json_path.exists() else 0,
         "token_set": bool(PRINTIFY_TOKEN),
-        "state_file": os.path.exists(STATE_FILE),
+        "state_file_exists": os.path.exists(STATE_FILE),
     }
 
 @app.get("/status")
 def status():
     uploaded = load_state()
-    pending = [f for f in DESIGN_FILENAMES if f not in uploaded]
+    pending = [f for f in DESIGN_FILENAMES if f not in uploaded and not f.startswith("ERROR")]
 
     return {
         "total_files": len(DESIGN_FILENAMES),
@@ -114,27 +120,19 @@ def status():
 @app.post("/upload")
 def upload():
     if not PRINTIFY_TOKEN:
+        return JSONResponse(status_code=500, content={"error": "PRINTIFY_TOKEN env var is not set"})
+
+    if any(f.startswith("ERROR") for f in DESIGN_FILENAMES):
         return JSONResponse(
             status_code=500,
-            content={"error": "PRINTIFY_TOKEN env var is not set"}
-        )
-
-    if not DESIGN_FILENAMES:
-        return JSONResponse(
-            status_code=400,
-            content={"error": "designs.json is missing or empty"}
+            content={"error": "designs.json failed to load", "details": DESIGN_FILENAMES}
         )
 
     uploaded = load_state()
     pending = [f for f in DESIGN_FILENAMES if f not in uploaded]
 
     if not pending:
-        return {
-            "status": "complete",
-            "message": "All designs already uploaded",
-            "total_files": len(DESIGN_FILENAMES),
-            "total_uploaded": len(uploaded),
-        }
+        return {"status": "complete", "message": "All designs already uploaded"}
 
     batch = pending[:BATCH_SIZE]
     succeeded = []

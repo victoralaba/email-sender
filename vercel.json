@@ -9,6 +9,11 @@
   "routes": [
     { "src": "/(.*)", "dest": "main.py" }
   ],
+  "functions": {
+    "main.py": {
+      "includeFiles": ["designs.json"]
+    }
+  },
   "crons": [
     { "path": "/upload", "schedule": "0 2 * * *" }
   ]
