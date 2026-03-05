@@ -5,6 +5,7 @@ import urllib.error
 import time
 import pathlib
 import mimetypes
+import base64
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse, Response
@@ -60,23 +61,41 @@ def save_state(uploaded: set[str]) -> None:
 
 
 def upload_file(filename: str) -> tuple[bool, object]:
-    """Upload a single design file to Printify via its public URL."""
-    public_url = f"{BASE_URL}/designs/{filename}"
-    payload = json.dumps({"file_name": filename, "url": public_url}).encode()
-    req = urllib.request.Request(
-        "https://api.printify.com/v1/uploads/images.json",
-        data=payload,
-        headers={
-            "Authorization": f"Bearer {PRINTIFY_TOKEN}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
+    """Upload a single design file to Printify by sending base64 content."""
+    file_path = DESIGNS_DIR / filename
+    
+    if not file_path.is_file():
+        return False, f"File not found on disk: {filename}"
+    
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with open(file_path, "rb") as f:
+            content = f.read()
+            b64_content = base64.b64encode(content).decode("utf-8")
+        
+        payload = json.dumps({
+            "file_name": filename,
+            "contents": b64_content     # ← Printify accepts this field
+        }).encode()
+
+        req = urllib.request.Request(
+            "https://api.printify.com/v1/uploads/images.json",
+            data=payload,
+            headers={
+                "Authorization": f"Bearer {PRINTIFY_TOKEN}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+
+        with urllib.request.urlopen(req, timeout=20) as resp:
             return True, json.loads(resp.read())
+
     except urllib.error.HTTPError as e:
-        return False, e.read().decode()
+        try:
+            err_body = e.read().decode()
+        except:
+            err_body = str(e)
+        return False, err_body
     except Exception as e:
         return False, str(e)
 
