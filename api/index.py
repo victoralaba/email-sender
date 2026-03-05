@@ -7,7 +7,11 @@ import time
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
-app = FastAPI()
+app = FastAPI(
+    title="Printify Bulk Uploader",
+    docs_url="/docs",
+    redoc_url="/redoc",
+)
 
 # ── config ────────────────────────────────────────────────────────────────────
 PRINTIFY_TOKEN = os.getenv("PRINTIFY_TOKEN")
@@ -72,7 +76,12 @@ def upload_file(filename: str, base_url: str):
 
 # ── routes ────────────────────────────────────────────────────────────────────
 
-@app.get("/api/status")
+@app.get("/")
+def root():
+    return {"message": "Printify uploader is live. Visit /docs for the Swagger UI."}
+
+
+@app.get("/status")
 def status():
     uploaded  = load_state()
     all_files = get_all_design_files()
@@ -88,8 +97,8 @@ def status():
     }
 
 
-@app.get("/api/upload")
-@app.post("/api/upload")
+@app.get("/upload")
+@app.post("/upload")
 def upload():
     if not PRINTIFY_TOKEN:
         return JSONResponse(status_code=500, content={"error": "PRINTIFY_TOKEN is not set"})
