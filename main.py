@@ -4,47 +4,42 @@ import urllib.request
 import urllib.error
 import time
 import pathlib
-import mimetypes
-import base64
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse, Response
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 
-# ── app ───────────────────────────────────────────────────────────────────────
+# ── App ───────────────────────────────────────────────────────────────────────
 app = FastAPI(
-    title="Printify Bulk Uploader",
+    title="Printify Bulk Uploader (GitHub Raw)",
     docs_url="/docs",
     redoc_url="/redoc",
 )
 
-# ── config ────────────────────────────────────────────────────────────────────
+# ── Config ────────────────────────────────────────────────────────────────────
 PRINTIFY_TOKEN = os.getenv("PRINTIFY_TOKEN")
-BASE_URL       = os.getenv("BASE_URL", "").rstrip("/")   # e.g. https://your-app.vercel.app
+# Change only if you move the designs folder or change repo/branch
+GITHUB_BASE_URL = os.getenv(
+    "GITHUB_BASE_URL",
+    "https://raw.githubusercontent.com/victoralaba/email-sender/main/public/designs"
+)
 
-ROOT        = pathlib.Path(__file__).resolve().parent
-DESIGNS_DIR = ROOT / "public" / "designs"
-
-BATCH_SIZE    = 25
+BATCH_SIZE = 25
 SLEEP_BETWEEN = 0.6
-SUPPORTED     = (".png", ".jpg", ".jpeg", ".svg", ".webp")
-STATE_FILE    = "/tmp/uploaded_files.json"
-# ──────────────────────────────────────────────────────────────────────────────
+STATE_FILE = "/tmp/uploaded_files.json"
 
+ROOT = pathlib.Path(__file__).resolve().parent
 
-
-
-# ── helpers ───────────────────────────────────────────────────────────────────
-
-def get_all_design_files() -> list[str]:
+# Load design list (from designs.json)
+def load_design_filenames() -> list[str]:
     try:
-        return sorted(
-            f for f in os.listdir(DESIGNS_DIR)
-            if f.lower().endswith(SUPPORTED)
-        )
-    except FileNotFoundError:
+        with open(ROOT / "designs.json") as f:
+            return json.load(f)
+    except Exception:
         return []
 
+DESIGN_FILENAMES = load_design_filenames()
 
+# ── Helpers ───────────────────────────────────────────────────────────────────
 def load_state() -> set[str]:
     if os.path.exists(STATE_FILE):
         try:
@@ -54,122 +49,66 @@ def load_state() -> set[str]:
             pass
     return set()
 
-
 def save_state(uploaded: set[str]) -> None:
     with open(STATE_FILE, "w") as f:
         json.dump(sorted(uploaded), f)
 
-
 def upload_file(filename: str) -> tuple[bool, object]:
-    """Upload a single design file to Printify by sending base64 content."""
-    file_path = DESIGNS_DIR / filename
-    
-    if not file_path.is_file():
-        return False, f"File not found on disk: {filename}"
-    
+    """Upload using public GitHub raw URL"""
+    public_url = f"{GITHUB_BASE_URL}/{filename}"
+    payload = json.dumps({
+        "file_name": filename,
+        "url": public_url
+    }).encode()
+
+    req = urllib.request.Request(
+        "https://api.printify.com/v1/uploads/images.json",
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {PRINTIFY_TOKEN}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
     try:
-        with open(file_path, "rb") as f:
-            content = f.read()
-            b64_content = base64.b64encode(content).decode("utf-8")
-        
-        payload = json.dumps({
-            "file_name": filename,
-            "contents": b64_content     # ← Printify accepts this field
-        }).encode()
-
-        req = urllib.request.Request(
-            "https://api.printify.com/v1/uploads/images.json",
-            data=payload,
-            headers={
-                "Authorization": f"Bearer {PRINTIFY_TOKEN}",
-                "Content-Type": "application/json",
-            },
-            method="POST",
-        )
-
         with urllib.request.urlopen(req, timeout=20) as resp:
             return True, json.loads(resp.read())
-
     except urllib.error.HTTPError as e:
-        try:
-            err_body = e.read().decode()
-        except:
-            err_body = str(e)
-        return False, err_body
+        return False, e.read().decode()
     except Exception as e:
         return False, str(e)
 
-
-# ── routes ────────────────────────────────────────────────────────────────────
-
+# ── Routes ────────────────────────────────────────────────────────────────────
 @app.get("/")
 def root():
     return {
-        "message": "Printify bulk uploader is live.",
-        "endpoints": {
-            "docs":    "/docs",
-            "status":  "/status",
-            "upload":  "/upload  (GET or POST)",
-            "debug":   "/debug",
-            "designs": "/designs/{filename}",
-        },
+        "message": "Printify Bulk Uploader (GitHub Raw) is live",
+        "total_designs": len(DESIGN_FILENAMES),
+        "github_base": GITHUB_BASE_URL,
     }
-
-
-@app.get("/designs/{filename}")
-def serve_design(filename: str):
-    """Serve a design file directly from the bundled public/designs folder."""
-    safe_name = pathlib.Path(filename).name  # prevent path traversal
-    file_path = DESIGNS_DIR / safe_name
-
-    if not file_path.exists() or not file_path.is_file():
-        raise HTTPException(status_code=404, detail=f"Design '{safe_name}' not found")
-
-    mime, _ = mimetypes.guess_type(str(file_path))
-    mime = mime or "application/octet-stream"
-
-    return Response(
-        content=file_path.read_bytes(),
-        media_type=mime,
-        headers={"Cache-Control": "public, max-age=31536000"},
-    )
-
 
 @app.get("/debug")
 def debug():
-    """Inspect the runtime environment — remove or protect this in production."""
-    try:
-        files = sorted(os.listdir(DESIGNS_DIR))
-    except Exception as e:
-        files = [f"ERROR: {e}"]
-
     return {
-        "__file__":         str(pathlib.Path(__file__).resolve()),
-        "designs_dir":      str(DESIGNS_DIR),
-        "designs_exist":    DESIGNS_DIR.exists(),
-        "cwd":              os.getcwd(),
-        "base_url":         BASE_URL,
-        "token_set":        bool(PRINTIFY_TOKEN),
-        "design_files":     files[:20],   # first 20 for safety
-        "total_on_disk":    len(files),
+        "github_base_url": GITHUB_BASE_URL,
+        "total_designs": len(DESIGN_FILENAMES),
+        "first_10_designs": DESIGN_FILENAMES[:10],
+        "token_set": bool(PRINTIFY_TOKEN),
+        "state_file": os.path.exists(STATE_FILE),
     }
-
 
 @app.get("/status")
 def status():
-    uploaded  = load_state()
-    all_files = get_all_design_files()
-    pending   = [f for f in all_files if f not in uploaded]
+    uploaded = load_state()
+    pending = [f for f in DESIGN_FILENAMES if f not in uploaded]
 
     return {
-        "total_files":    len(all_files),
+        "total_files": len(DESIGN_FILENAMES),
         "total_uploaded": len(uploaded),
-        "remaining":      len(pending),
-        "percent_done":   round(len(uploaded) / max(len(all_files), 1) * 100, 1),
-        "uploaded_files": sorted(uploaded),
-        "pending_files":  pending,
+        "remaining": len(pending),
+        "percent_done": round(len(uploaded) / max(len(DESIGN_FILENAMES), 1) * 100, 1),
+        "pending_files_sample": pending[:50],
     }
-
 
 @app.get("/upload")
 @app.post("/upload")
@@ -177,40 +116,29 @@ def upload():
     if not PRINTIFY_TOKEN:
         return JSONResponse(
             status_code=500,
-            content={"error": "PRINTIFY_TOKEN env var is not set"},
+            content={"error": "PRINTIFY_TOKEN env var is not set"}
         )
 
-    if not BASE_URL:
+    if not DESIGN_FILENAMES:
         return JSONResponse(
-            status_code=500,
-            content={"error": "BASE_URL env var is not set (e.g. https://your-app.vercel.app)"},
-        )
-
-    all_files = get_all_design_files()
-    if not all_files:
-        return JSONResponse(
-            status_code=404,
-            content={
-                "error":       "No design files found",
-                "designs_dir": str(DESIGNS_DIR),
-                "tip":         "Check /debug for runtime path info",
-            },
+            status_code=400,
+            content={"error": "designs.json is missing or empty"}
         )
 
     uploaded = load_state()
-    pending  = [f for f in all_files if f not in uploaded]
+    pending = [f for f in DESIGN_FILENAMES if f not in uploaded]
 
     if not pending:
         return {
-            "status":         "complete",
-            "message":        "All files already uploaded",
-            "total_files":    len(all_files),
+            "status": "complete",
+            "message": "All designs already uploaded",
+            "total_files": len(DESIGN_FILENAMES),
             "total_uploaded": len(uploaded),
         }
 
-    batch     = pending[:BATCH_SIZE]
+    batch = pending[:BATCH_SIZE]
     succeeded = []
-    failed    = []
+    failed = []
 
     for filename in batch:
         ok, resp = upload_file(filename)
@@ -218,19 +146,17 @@ def upload():
             succeeded.append(filename)
             uploaded.add(filename)
         else:
-            failed.append({"file": filename, "error": resp})
+            failed.append({"file": filename, "error": str(resp)[:500]})
         time.sleep(SLEEP_BETWEEN)
 
     save_state(uploaded)
 
-    remaining_after = len(pending) - len(batch)
     return {
-        "status":         "complete" if remaining_after == 0 else "partial",
-        "batch_size":     len(batch),
-        "succeeded":      len(succeeded),
-        "failed":         len(failed),
+        "status": "complete" if len(pending) <= BATCH_SIZE else "partial",
+        "batch_size": len(batch),
+        "succeeded": len(succeeded),
+        "failed": len(failed),
         "failed_details": failed,
-        "remaining":      remaining_after,
-        "total_files":    len(all_files),
+        "remaining": len(pending) - len(batch),
         "total_uploaded": len(uploaded),
     }
