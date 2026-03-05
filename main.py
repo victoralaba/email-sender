@@ -3,20 +3,19 @@ import json
 import urllib.request
 import urllib.error
 import time
+import traceback
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List
 
-# ── App ───────────────────────────────────────────────────────────────────────
 app = FastAPI(
-    title="Printify Fresh Start Uploader",
+    title="Printify Uploader - Debug Mode",
     docs_url="/docs",
     redoc_url="/redoc",
 )
 
-# ── Config ────────────────────────────────────────────────────────────────────
 PRINTIFY_TOKEN = os.getenv("PRINTIFY_TOKEN")
 GITHUB_BASE_URL = os.getenv(
     "GITHUB_BASE_URL",
@@ -26,132 +25,103 @@ GITHUB_BASE_URL = os.getenv(
 BATCH_SIZE = 25
 SLEEP_BETWEEN = 0.6
 
-HEADERS = {
-    "Authorization": f"Bearer {PRINTIFY_TOKEN}",
-    "Content-Type": "application/json",
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "Accept": "application/json",
-    "Referer": "https://printify.com/",
-    "Origin": "https://printify.com"
-}
-
-# ── Upload helper ─────────────────────────────────────────────────────────────
-def upload_file(filename: str) -> tuple[bool, object]:
-    public_url = f"{GITHUB_BASE_URL}/{filename}"
-    payload = json.dumps({"file_name": filename, "url": public_url}).encode()
-
-    req = urllib.request.Request(
-        "https://api.printify.com/v1/uploads/images.json",
-        data=payload,
-        headers=HEADERS,
-        method="POST",
+# ── Global error handler (this is what shows the real 500 cause) ─────────────
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": str(exc),
+            "type": type(exc).__name__,
+            "traceback": traceback.format_exc().splitlines()[-10:]  # last 10 lines
+        }
     )
+
+# ── Safe request helper ───────────────────────────────────────────────────────
+def make_request(method: str, url: str, data=None):
+    headers = {
+        "Authorization": f"Bearer {PRINTIFY_TOKEN}",
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json",
+        "Referer": "https://printify.com/",
+        "Origin": "https://printify.com"
+    }
     try:
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
         with urllib.request.urlopen(req, timeout=25) as resp:
-            return True, json.loads(resp.read())
+            body = resp.read()
+            return True, json.loads(body) if body else {}
     except urllib.error.HTTPError as e:
-        return False, e.read().decode()[:600]
+        body = e.read().decode(errors="ignore")
+        return False, {"status": e.code, "body": body[:2000]}
     except Exception as e:
-        return False, str(e)
+        return False, {"error": str(e)}
 
 # ── Models ────────────────────────────────────────────────────────────────────
 class BatchUploadRequest(BaseModel):
     filenames: List[str]
 
-class ArchiveConfirm(BaseModel):
-    confirm: str = "no"
-
 # ── Routes ────────────────────────────────────────────────────────────────────
 @app.get("/")
 def root():
-    return {"message": "Printify Fresh Start ready — use /docs"}
+    return {"message": "Ready — go to /docs"}
 
 @app.get("/debug")
 def debug():
-    return {"token_set": bool(PRINTIFY_TOKEN), "github_base": GITHUB_BASE_URL}
+    return {"token_set": bool(PRINTIFY_TOKEN)}
 
-# ── Fixed: List all uploaded images ───────────────────────────────────────────
 @app.get("/list-uploads")
 def list_uploads():
     if not PRINTIFY_TOKEN:
-        return JSONResponse(status_code=500, content={"error": "PRINTIFY_TOKEN missing"})
+        raise ValueError("PRINTIFY_TOKEN is not set")
+    success, result = make_request("GET", "https://api.printify.com/v1/uploads.json")
+    if not success:
+        raise Exception(f"List failed: {result}")
+    return {"total": len(result), "images": result}
 
-    req = urllib.request.Request(
-        "https://api.printify.com/v1/uploads.json",   # ← CORRECTED ENDPOINT
-        headers=HEADERS,
-        method="GET",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read())
-            return {
-                "total": len(data),
-                "images": [
-                    {
-                        "id": img.get("id"),
-                        "file_name": img.get("file_name"),
-                        "created_at": img.get("created_at")
-                    } for img in data
-                ]
-            }
-    except Exception as e:
-        return JSONResponse(status_code=400, content={"error": str(e)})
-
-# ── Archive ALL previous uploads (safe) ───────────────────────────────────────
 @app.post("/archive-all")
-def archive_all(confirm: ArchiveConfirm):
+def archive_all(confirm: str = "no"):
+    if confirm != "YES_ARCHIVE_ALL":
+        return {"message": "Send ?confirm=YES_ARCHIVE_ALL or body {\"confirm\": \"YES_ARCHIVE_ALL\"}"}
+
     if not PRINTIFY_TOKEN:
-        return JSONResponse(status_code=500, content={"error": "PRINTIFY_TOKEN missing"})
+        raise ValueError("PRINTIFY_TOKEN is not set")
 
-    if confirm.confirm != "YES_ARCHIVE_ALL":
-        return {"message": "❌ Send {\"confirm\": \"YES_ARCHIVE_ALL\"} to archive everything."}
-
-    # Step 1: Get list (using the fixed endpoint)
-    try:
-        req = urllib.request.Request("https://api.printify.com/v1/uploads.json", headers=HEADERS, method="GET")
-        with urllib.request.urlopen(req) as resp:
-            uploads = json.loads(resp.read())
-    except Exception as e:
-        return JSONResponse(status_code=400, content={"error": f"Failed to list uploads: {e}"})
+    # List uploads
+    success, uploads = make_request("GET", "https://api.printify.com/v1/uploads.json")
+    if not success:
+        raise Exception(f"Failed to list uploads: {uploads}")
 
     if not uploads:
-        return {"message": "✅ Nothing to archive — your Printify library is already empty!"}
+        return {"message": "✅ Already empty!"}
 
     archived = 0
     failed = []
 
-    for img in uploads:
+    for img in uploads[:100]:  # safety limit
         image_id = img.get("id")
         if not image_id:
             continue
-        try:
-            req = urllib.request.Request(
-                f"https://api.printify.com/v1/uploads/{image_id}/archive.json",
-                data=b'{}',
-                headers=HEADERS,
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=15):
-                archived += 1
-            time.sleep(0.4)
-        except Exception as e:
-            failed.append({"id": image_id, "error": str(e)[:200]})
+        archive_url = f"https://api.printify.com/v1/uploads/{image_id}/archive.json"
+        success, result = make_request("POST", archive_url, data=b'{}')
+        if success:
+            archived += 1
+        else:
+            failed.append({"id": image_id, "error": result})
+        time.sleep(0.5)
 
     return {
         "status": "done",
         "archived": archived,
         "failed": failed,
-        "message": f"✅ Archived {archived} files. Your Printify library is now clean and ready for a fresh upload!"
+        "message": f"Archived {archived} files. Call again if more remain."
     }
 
-# ── Manual batch upload (paste your list here) ────────────────────────────────
 @app.post("/upload-batch")
 def upload_batch(request: BatchUploadRequest):
     if not PRINTIFY_TOKEN:
-        return JSONResponse(status_code=500, content={"error": "PRINTIFY_TOKEN not set"})
-
-    if not request.filenames:
-        return {"error": "Provide 'filenames' array"}
+        raise ValueError("PRINTIFY_TOKEN is not set")
 
     pending = list(request.filenames)
     batch = pending[:BATCH_SIZE]
@@ -159,20 +129,23 @@ def upload_batch(request: BatchUploadRequest):
     failed = []
 
     for filename in batch:
-        ok, resp = upload_file(filename)
-        if ok:
+        public_url = f"{GITHUB_BASE_URL}/{filename}"
+        payload = json.dumps({"file_name": filename, "url": public_url}).encode()
+        success, result = make_request("POST", "https://api.printify.com/v1/uploads/images.json", data=payload)
+        if success:
             succeeded.append(filename)
         else:
-            failed.append({"file": filename, "error": resp})
+            failed.append({"file": filename, "error": result})
         time.sleep(SLEEP_BETWEEN)
 
     remaining = [f for f in pending if f not in succeeded]
 
     return {
         "batch_processed": len(batch),
-        "succeeded": succeeded,
-        "failed": failed,
+        "succeeded": len(succeeded),
+        "failed": len(failed),
+        "failed_details": failed,
         "remaining_count": len(remaining),
-        "remaining_files": remaining[:400],   # copy-paste friendly
-        "note": "Copy the entire 'remaining_files' array and paste it into the next /upload-batch call"
+        "remaining_files": remaining[:400],
+        "note": "Copy remaining_files for next call"
     }
