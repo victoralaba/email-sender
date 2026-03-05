@@ -1,8 +1,12 @@
 {
   "version": 2,
-  "routes": [
-    {"src": "/api/upload", "dest": "/api/upload.py"},
-    {"src": "/api/status", "dest": "/api/status.py"}
+  "builds": [
+    { "src": "api/index.py", "use": "@vercel/python" }
   ],
-  "crons": [{"path": "/api/upload", "schedule": "0 2 * * *"}]
+  "routes": [
+    { "src": "/api/(.*)", "dest": "api/index.py" }
+  ],
+  "crons": [
+    { "path": "/api/upload", "schedule": "0 2 * * *" }
+  ]
 }

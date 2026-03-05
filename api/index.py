@@ -3,21 +3,22 @@ import json
 import urllib.request
 import urllib.error
 import time
-from http.server import BaseHTTPRequestHandler
+
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+
+app = FastAPI()
 
 # ── config ────────────────────────────────────────────────────────────────────
 PRINTIFY_TOKEN = os.getenv("PRINTIFY_TOKEN")
-# Vercel sets VERCEL_URL automatically (no https://)
-# VERCEL_PROJECT_PRODUCTION_URL is the stable production URL
 VERCEL_URL = (
     os.getenv("VERCEL_PROJECT_PRODUCTION_URL")
     or os.getenv("VERCEL_URL", "")
 )
-# Path relative to repo root — Vercel deploys the whole repo
 DESIGNS_DIR = os.path.join(os.path.dirname(__file__), "..", "public", "designs")
 
-BATCH_SIZE    = 25     # files per cron run (stays under 60s limit)
-SLEEP_BETWEEN = 0.6    # seconds between Printify calls (rate-limit safety)
+BATCH_SIZE    = 25
+SLEEP_BETWEEN = 0.6
 SUPPORTED     = (".png", ".jpg", ".jpeg", ".svg", ".webp")
 STATE_FILE    = "/tmp/uploaded_files.json"
 # ──────────────────────────────────────────────────────────────────────────────
@@ -69,12 +70,32 @@ def upload_file(filename: str, base_url: str):
         return False, str(e)
 
 
-def run_upload():
+# ── routes ────────────────────────────────────────────────────────────────────
+
+@app.get("/api/status")
+def status():
+    uploaded  = load_state()
+    all_files = get_all_design_files()
+    pending   = [f for f in all_files if f not in uploaded]
+
+    return {
+        "total_files":    len(all_files),
+        "total_uploaded": len(uploaded),
+        "remaining":      len(pending),
+        "percent_done":   round(len(uploaded) / max(len(all_files), 1) * 100, 1),
+        "uploaded_files": sorted(uploaded),
+        "pending_files":  pending,
+    }
+
+
+@app.get("/api/upload")
+@app.post("/api/upload")
+def upload():
     if not PRINTIFY_TOKEN:
-        return 500, {"error": "PRINTIFY_TOKEN is not set in Vercel environment variables"}
+        return JSONResponse(status_code=500, content={"error": "PRINTIFY_TOKEN is not set"})
 
     if not VERCEL_URL:
-        return 500, {"error": "VERCEL_URL not detected — set VERCEL_PROJECT_PRODUCTION_URL manually in env vars"}
+        return JSONResponse(status_code=500, content={"error": "VERCEL_URL not detected — set VERCEL_PROJECT_PRODUCTION_URL in env vars"})
 
     base = VERCEL_URL.rstrip("/")
     if not base.startswith("http"):
@@ -82,16 +103,13 @@ def run_upload():
 
     all_files = get_all_design_files()
     if not all_files:
-        return 200, {
-            "status": "error",
-            "message": f"No design files found. Looked in: {os.path.abspath(DESIGNS_DIR)}",
-        }
+        return {"status": "error", "message": f"No design files found in: {os.path.abspath(DESIGNS_DIR)}"}
 
     uploaded = load_state()
     pending  = [f for f in all_files if f not in uploaded]
 
     if not pending:
-        return 200, {
+        return {
             "status":         "complete",
             "message":        "All files already uploaded",
             "total_files":    len(all_files),
@@ -107,16 +125,14 @@ def run_upload():
         if ok:
             succeeded.append(filename)
             uploaded.add(filename)
-            print(f"[upload] ✅ {filename}")
         else:
             failed.append({"file": filename, "error": resp})
-            print(f"[upload] ❌ {filename} — {resp}")
         time.sleep(SLEEP_BETWEEN)
 
     save_state(uploaded)
 
     remaining = len(pending) - len(batch)
-    return 200, {
+    return {
         "status":         "complete" if remaining == 0 else "partial",
         "batch_size":     len(batch),
         "succeeded":      len(succeeded),
@@ -126,26 +142,3 @@ def run_upload():
         "total_files":    len(all_files),
         "total_uploaded": len(uploaded),
     }
-
-
-# ── Vercel serverless handler ──────────────────────────────────────────────────
-class handler(BaseHTTPRequestHandler):
-
-    def log_message(self, fmt, *args):
-        pass  # silence noisy default logging
-
-    def do_GET(self):
-        """Manual trigger: GET /api/upload"""
-        self._respond(*run_upload())
-
-    def do_POST(self):
-        """Vercel Cron Jobs use POST"""
-        self._respond(*run_upload())
-
-    def _respond(self, status: int, body: dict):
-        payload = json.dumps(body, indent=2).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
