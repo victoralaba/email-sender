@@ -1,1 +1,1 @@
-requests
+# No external deps needed — using stdlib urllib instead of requests
