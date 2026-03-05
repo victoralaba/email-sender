@@ -2,7 +2,7 @@
   "version": 2,
   "builds": [
     {
-      "src": "api/index.py",
+      "src": "main.py",
       "use": "@vercel/python",
       "config": {
         "includeFiles": ["public/designs/**"]
@@ -10,7 +10,7 @@
     }
   ],
   "routes": [
-    { "src": "/(.*)", "dest": "api/index.py" }
+    { "src": "/(.*)", "dest": "main.py" }
   ],
   "crons": [
     { "path": "/upload", "schedule": "0 2 * * *" }

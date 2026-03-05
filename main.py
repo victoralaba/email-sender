@@ -3,10 +3,13 @@ import json
 import urllib.request
 import urllib.error
 import time
+import pathlib
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
+# ── app ───────────────────────────────────────────────────────────────────────
 app = FastAPI(
     title="Printify Bulk Uploader",
     docs_url="/docs",
@@ -15,11 +18,10 @@ app = FastAPI(
 
 # ── config ────────────────────────────────────────────────────────────────────
 PRINTIFY_TOKEN = os.getenv("PRINTIFY_TOKEN")
-VERCEL_URL = (
-    os.getenv("VERCEL_PROJECT_PRODUCTION_URL")
-    or os.getenv("VERCEL_URL", "")
-)
-DESIGNS_DIR = os.path.join(os.path.dirname(__file__), "..", "public", "designs")
+BASE_URL       = os.getenv("BASE_URL", "").rstrip("/")   # e.g. https://your-app.vercel.app
+
+ROOT        = pathlib.Path(__file__).resolve().parent
+DESIGNS_DIR = ROOT / "public" / "designs"
 
 BATCH_SIZE    = 25
 SLEEP_BETWEEN = 0.6
@@ -27,18 +29,28 @@ SUPPORTED     = (".png", ".jpg", ".jpeg", ".svg", ".webp")
 STATE_FILE    = "/tmp/uploaded_files.json"
 # ──────────────────────────────────────────────────────────────────────────────
 
+# Serve everything in /public as static files at /public
+# e.g.  https://your-app.vercel.app/public/designs/0004.svg
+app.mount(
+    "/public",
+    StaticFiles(directory=str(ROOT / "public")),
+    name="public",
+)
 
-def get_all_design_files():
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+def get_all_design_files() -> list[str]:
     try:
-        return sorted([
+        return sorted(
             f for f in os.listdir(DESIGNS_DIR)
             if f.lower().endswith(SUPPORTED)
-        ])
+        )
     except FileNotFoundError:
         return []
 
 
-def load_state():
+def load_state() -> set[str]:
     if os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE) as f:
@@ -48,14 +60,15 @@ def load_state():
     return set()
 
 
-def save_state(uploaded: set):
+def save_state(uploaded: set[str]) -> None:
     with open(STATE_FILE, "w") as f:
         json.dump(sorted(uploaded), f)
 
 
-def upload_file(filename: str, base_url: str):
-    url = f"{base_url}/designs/{filename}"
-    payload = json.dumps({"file_name": filename, "url": url}).encode()
+def upload_file(filename: str) -> tuple[bool, object]:
+    """Upload a single design file to Printify via its public URL."""
+    public_url = f"{BASE_URL}/public/designs/{filename}"
+    payload = json.dumps({"file_name": filename, "url": public_url}).encode()
     req = urllib.request.Request(
         "https://api.printify.com/v1/uploads/images.json",
         data=payload,
@@ -78,7 +91,35 @@ def upload_file(filename: str, base_url: str):
 
 @app.get("/")
 def root():
-    return {"message": "Printify uploader is live. Visit /docs for the Swagger UI."}
+    return {
+        "message": "Printify bulk uploader is live.",
+        "endpoints": {
+            "docs":   "/docs",
+            "status": "/status",
+            "upload": "/upload  (GET or POST)",
+            "debug":  "/debug",
+        },
+    }
+
+
+@app.get("/debug")
+def debug():
+    """Inspect the runtime environment — remove or protect this in production."""
+    try:
+        files = sorted(os.listdir(DESIGNS_DIR))
+    except Exception as e:
+        files = [f"ERROR: {e}"]
+
+    return {
+        "__file__":         str(pathlib.Path(__file__).resolve()),
+        "designs_dir":      str(DESIGNS_DIR),
+        "designs_exist":    DESIGNS_DIR.exists(),
+        "cwd":              os.getcwd(),
+        "base_url":         BASE_URL,
+        "token_set":        bool(PRINTIFY_TOKEN),
+        "design_files":     files[:20],   # first 20 for safety
+        "total_on_disk":    len(files),
+    }
 
 
 @app.get("/status")
@@ -101,18 +142,27 @@ def status():
 @app.post("/upload")
 def upload():
     if not PRINTIFY_TOKEN:
-        return JSONResponse(status_code=500, content={"error": "PRINTIFY_TOKEN is not set"})
+        return JSONResponse(
+            status_code=500,
+            content={"error": "PRINTIFY_TOKEN env var is not set"},
+        )
 
-    if not VERCEL_URL:
-        return JSONResponse(status_code=500, content={"error": "VERCEL_URL not detected — set VERCEL_PROJECT_PRODUCTION_URL in env vars"})
-
-    base = VERCEL_URL.rstrip("/")
-    if not base.startswith("http"):
-        base = f"https://{base}"
+    if not BASE_URL:
+        return JSONResponse(
+            status_code=500,
+            content={"error": "BASE_URL env var is not set (e.g. https://your-app.vercel.app)"},
+        )
 
     all_files = get_all_design_files()
     if not all_files:
-        return {"status": "error", "message": f"No design files found in: {os.path.abspath(DESIGNS_DIR)}"}
+        return JSONResponse(
+            status_code=404,
+            content={
+                "error":       "No design files found",
+                "designs_dir": str(DESIGNS_DIR),
+                "tip":         "Check /debug for runtime path info",
+            },
+        )
 
     uploaded = load_state()
     pending  = [f for f in all_files if f not in uploaded]
@@ -130,7 +180,7 @@ def upload():
     failed    = []
 
     for filename in batch:
-        ok, resp = upload_file(filename, base)
+        ok, resp = upload_file(filename)
         if ok:
             succeeded.append(filename)
             uploaded.add(filename)
@@ -140,14 +190,14 @@ def upload():
 
     save_state(uploaded)
 
-    remaining = len(pending) - len(batch)
+    remaining_after = len(pending) - len(batch)
     return {
-        "status":         "complete" if remaining == 0 else "partial",
+        "status":         "complete" if remaining_after == 0 else "partial",
         "batch_size":     len(batch),
         "succeeded":      len(succeeded),
         "failed":         len(failed),
         "failed_details": failed,
-        "remaining":      remaining,
+        "remaining":      remaining_after,
         "total_files":    len(all_files),
         "total_uploaded": len(uploaded),
     }
