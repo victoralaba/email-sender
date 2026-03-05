@@ -4,10 +4,10 @@ import urllib.request
 import urllib.error
 import time
 import pathlib
+import mimetypes
 
-from fastapi import FastAPI
-from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse, Response
 
 # ── app ───────────────────────────────────────────────────────────────────────
 app = FastAPI(
@@ -29,13 +29,7 @@ SUPPORTED     = (".png", ".jpg", ".jpeg", ".svg", ".webp")
 STATE_FILE    = "/tmp/uploaded_files.json"
 # ──────────────────────────────────────────────────────────────────────────────
 
-# Serve everything in /public as static files at /public
-# e.g.  https://your-app.vercel.app/public/designs/0004.svg
-app.mount(
-    "/public",
-    StaticFiles(directory=str(ROOT / "public")),
-    name="public",
-)
+
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -67,7 +61,7 @@ def save_state(uploaded: set[str]) -> None:
 
 def upload_file(filename: str) -> tuple[bool, object]:
     """Upload a single design file to Printify via its public URL."""
-    public_url = f"{BASE_URL}/public/designs/{filename}"
+    public_url = f"{BASE_URL}/designs/{filename}"
     payload = json.dumps({"file_name": filename, "url": public_url}).encode()
     req = urllib.request.Request(
         "https://api.printify.com/v1/uploads/images.json",
@@ -94,12 +88,32 @@ def root():
     return {
         "message": "Printify bulk uploader is live.",
         "endpoints": {
-            "docs":   "/docs",
-            "status": "/status",
-            "upload": "/upload  (GET or POST)",
-            "debug":  "/debug",
+            "docs":    "/docs",
+            "status":  "/status",
+            "upload":  "/upload  (GET or POST)",
+            "debug":   "/debug",
+            "designs": "/designs/{filename}",
         },
     }
+
+
+@app.get("/designs/{filename}")
+def serve_design(filename: str):
+    """Serve a design file directly from the bundled public/designs folder."""
+    safe_name = pathlib.Path(filename).name  # prevent path traversal
+    file_path = DESIGNS_DIR / safe_name
+
+    if not file_path.exists() or not file_path.is_file():
+        raise HTTPException(status_code=404, detail=f"Design '{safe_name}' not found")
+
+    mime, _ = mimetypes.guess_type(str(file_path))
+    mime = mime or "application/octet-stream"
+
+    return Response(
+        content=file_path.read_bytes(),
+        media_type=mime,
+        headers={"Cache-Control": "public, max-age=31536000"},
+    )
 
 
 @app.get("/debug")
